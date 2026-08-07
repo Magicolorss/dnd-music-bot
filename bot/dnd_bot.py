@@ -288,11 +288,14 @@ def cmd_recent(cid):
 
 def cmd_disk(cid):
     try:
-        r=subprocess.run(["df","-h","/Volumes/M1"],capture_output=True,text=True,timeout=5)
-        parts=[x for x in r.stdout.split() if x]
-        if len(parts)>=11:
-            tg_send(cid,"💾 *Disk: /Volumes/M1*\nSize: "+parts[8]+"\nUsed: "+parts[9]+"\nFree: "+parts[10]+"\nUsage: "+parts[11])
-    except: tg_send(cid,"❌ Error checking disk")
+        rf=lidarr("GET","rootFolder")
+        if rf and len(rf)>0:
+            fs=rf[0].get("freeSpace",0); ts=rf[0].get("totalSpace",0)
+            free_gb=fs//(1024**3); total_gb=ts//(1024**3); used_gb=total_gb-free_gb
+            pct=int((fs/ts)*100) if ts>0 else 0
+            tg_send(cid,"💾 *Disk: /music (Lidarr root)*\nSize: "+str(total_gb)+" GB\nUsed: "+str(used_gb)+" GB\nFree: "+str(free_gb)+" GB ("+str(pct)+"% free)")
+        else: tg_send(cid,"❌ No root folder found")
+    except: tg_send(cid,"❌ Error checking disk (bot runs inside container)")
 
 def cmd_lidarr(cid): tg_send(cid,"🔗 *Lidarr*\nhttp://100.101.21.73:8686")
 def cmd_qbit(cid): tg_send(cid,"🔗 *qBittorrent*\nhttp://100.101.21.73:8080\nUser: admin | Pass: (set in config)")
@@ -311,13 +314,7 @@ def cmd_restart(cid, service):
     ), daemon=True).start()
 
 def cmd_stack(cid):
-    try:
-        r=subprocess.run(["docker","ps","--format","{{.Names}}\t{{.Status}}\t{{.Ports}}"],capture_output=True,text=True,timeout=5)
-        lines=[l for l in r.stdout.strip().split("\n") if l]
-        msg="🐳 *Stack Status*\n"
-        for l in lines: parts=l.split("\t"); msg+="• "+parts[0]+" — "+parts[1].split()[0]+"\n" if len(parts)>=2 else ""
-        tg_send(cid,msg)
-    except: tg_send(cid,"❌ Error checking stack")
+    tg_send(cid,"🐳 *Stack containers*\n• flaresolverr\n• qbittorrent\n• prowlarr\n• lidarr\n• slskd\n• soularr\n• dnd-bot\n\nRun `/restart <name>` to restart any.\nFor live status, check the web UIs:\n`/lidarr` `/qbit` `/slskd` `/prowlarr`")
 
 # ── Messages ────────────────────────────────────────────────────
 def handle(cid, text):
