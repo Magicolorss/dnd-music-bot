@@ -1,0 +1,12 @@
+version: "3"
+services:
+  dnd-bot:
+    image: dnd-bot
+    container_name: dnd-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - /path/to/downloads:/downloads
+    network_mode: "bridge"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
