@@ -287,6 +287,17 @@ def cmd_recent(cid):
     tg_send(cid,msg)
 
 def cmd_disk(cid):
+    # Try reading real disk info from file written by watchdog
+    try:
+        with open("/downloads/.disk_status") as f:
+            line=f.read().strip()
+            if line:
+                parts=[x for x in line.split() if x]
+                if len(parts)>=4:
+                    tg_send(cid,"💾 *External SSD (/Volumes/M1)*\nSize: "+parts[1]+"\nUsed: "+parts[2]+"\nFree: "+parts[3]+"\nUsage: "+parts[4])
+                    return
+    except: pass
+    # Fallback: Lidarr API
     try:
         rf=lidarr("GET","rootFolder")
         if rf and len(rf)>0:
@@ -295,11 +306,11 @@ def cmd_disk(cid):
                 fs=r["freeSpace"]; ts=r["totalSpace"]
                 free_gb=fs//(1024**3); total_gb=ts//(1024**3); used_gb=total_gb-free_gb
                 pct=int((1-fs/ts)*100) if ts>0 else 0
-                tg_send(cid,"💾 *Disk: "+r.get("name","?")+"* ("+r.get("path","?")+")\nSize: "+str(total_gb)+" GB\nUsed: "+str(used_gb)+" GB\nFree: "+str(free_gb)+" GB\nUsed: "+str(pct)+"%")
+                tg_send(cid,"💾 *Disk: "+r.get("name","?")+"*\nSize: "+str(total_gb)+" GB\nUsed: "+str(used_gb)+" GB\nFree: "+str(free_gb)+" GB ("+str(pct)+"%)")
             else:
-                tg_send(cid,"💾 *Disk: "+r.get("name","?")+"* ("+r.get("path","?")+")\n⚠️ Volume inaccessible — try `/restart lidarr` to remount")
-        else: tg_send(cid,"❌ No root folder found in Lidarr")
-    except: tg_send(cid,"❌ Error checking disk")
+                tg_send(cid,"⚠️ Volume inaccessible — run `/restart lidarr` on Mac mini")
+        else: tg_send(cid,"❌ No root folder in Lidarr")
+    except: tg_send(cid,"❌ Error")
 
 def cmd_lidarr(cid): tg_send(cid,"🔗 *Lidarr*\nhttp://100.101.21.73:8686")
 def cmd_qbit(cid): tg_send(cid,"🔗 *qBittorrent*\nhttp://100.101.21.73:8080\nUser: admin | Pass: (set in config)")
