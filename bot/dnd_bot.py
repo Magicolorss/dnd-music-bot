@@ -58,9 +58,9 @@ def ai_guess(text):
 def mb_search(name):
     try: r=requests.get("https://musicbrainz.org/ws/2/artist/",params={"query":name,"fmt":"json","limit":6},headers={"User-Agent":"DnDBot/1.0"},timeout=15); return r.json().get("artists",[])
     except: return []
-def mb_albums(mbid):
+def mb_albums(mbid, atype="album"):
     try:
-        r=requests.get("https://musicbrainz.org/ws/2/release-group/",params={"artist":mbid,"fmt":"json","limit":100,"type":"album"},headers={"User-Agent":"DnDBot/1.0"},timeout=15)
+        r=requests.get("https://musicbrainz.org/ws/2/release-group/",params={"artist":mbid,"fmt":"json","limit":100,"type":atype},headers={"User-Agent":"DnDBot/1.0"},timeout=15)
         out=[]
         for g in r.json().get("release-groups",[]):
             y=g.get("first-release-date","")[:4] if g.get("first-release-date") else "9999"
@@ -157,20 +157,32 @@ def picker(cid,artists):
     pending[cid]={"artists":artists}; tg_send(cid,msg,btns)
 
 def show_confirm(cid,artist):
-    aname=artist.get("name","?"); mbid=artist["id"]; d=artist.get("disambiguation",""); albums=mb_albums(mbid); cover=artist_cover(aname); ai=ai_guess(aname) if OR_KEY else None
+    aname=artist.get("name","?"); d=artist.get("disambiguation",""); cover=artist_cover(aname)
     cap=ICON["musicbrainz"]+" *"+aname+"*"+(" ("+d+")" if d else "")
-    if ai and ai.get("bio"): cap+="\n\n"+ai["bio"][:300]
-    if albums: cap+="\n\n📀 *Albums:*"
-    pending[cid]={"artists":[artist],"albums":albums}
-    # Album picker buttons
+    cap+="\n\nWhat content type to browse?"
+    btns=[[{"text":"💿 Albums","callback_data":"content:album:"+aname[:30]},
+           {"text":"🎵 Singles","callback_data":"content:single:"+aname[:30]}],
+          [{"text":"📀 EPs","callback_data":"content:ep:"+aname[:30]},
+           {"text":"📚 Compilations","callback_data":"content:compilation:"+aname[:30]}]]
+    pending[cid]={"artists":[artist]}
+    if cover: tg_photo(cid,cover,cap,btns)
+    else: tg_send(cid,cap,btns)
+
+def show_album_list(cid,artist,atype,aname):
+    mbid=artist["id"]; albums=mb_albums(mbid,atype); cover=artist_cover(aname)
+    type_icons={"album":"💿","single":"🎵","ep":"📀","compilation":"📚"}
+    icon=type_icons.get(atype,"📀")
+    cap=icon+" *"+aname+"* — *"+atype.capitalize()+"s*\n"
+    if not albums: cap+="\nNo "+atype+"s found for this artist."
+    else:
+        cap+="\nChoose:"
+        pending[cid]={"artists":[artist],"albums":albums}
     btns=[]
     for a in albums[:25]:
         label=a["title"][:25]+(" ("+a["year"]+")" if a["year"] else "")
         btns.append([{"text":"🎵 "+label,"callback_data":"album:"+a["id"]+":"+a["title"][:20]}])
     btns.append([{"text":"📥 Add all + download","callback_data":"add:"+mbid+":"+aname}])
-    btns.append([{"text":ICON["bandcamp"]+" Bandcamp","callback_data":"send:"+aname}])
-    btns.append([{"text":ICON["youtube"]+" YouTube","callback_data":"yt:"+aname[:40]}])
-    btns.append([{"text":"❌ Cancel","callback_data":"cancel"}])
+    btns.append([{"text":"🔙 Back","callback_data":"back:"+aname[:30]}])
     if cover: tg_photo(cid,cover,cap,btns)
     else: tg_send(cid,cap,btns)
 
@@ -212,13 +224,27 @@ def cb_album(cid,parts,qid):
     info=pending.get(cid)
     if not info: tg_cb(qid,"Session expired"); return
     artist=info.get("artists",[{}])[0]; aname=artist.get("name","?")
-    # Find the Lidarr album by foreignAlbumId (MusicBrainz release-group ID)
     lidarr_lookup=lidarr("GET","album/lookup?term="+urllib.parse.quote("lidarr:"+gid))
     lidarr_id=None
     if lidarr_lookup and len(lidarr_lookup)>0:
         lidarr_id=lidarr_lookup[0].get("id")
     tg_cb(qid,"Adding "+title[:20]+"...")
     threading.Thread(target=lambda: do_add(cid,artist.get("id",""),aname,album_ids=[lidarr_id] if lidarr_id else None), daemon=True).start()
+
+def cb_content(cid,parts,qid):
+    atype=parts[1]; aname=parts[2] if len(parts)>2 else "?"
+    info=pending.get(cid)
+    if not info: tg_cb(qid,"Session expired"); return
+    artist=info.get("artists",[{}])[0]
+    tg_cb(qid,"Loading "+atype+"s...")
+    threading.Thread(target=lambda: show_album_list(cid,artist,atype,aname), daemon=True).start()
+
+def cb_back(cid,aname,qid):
+    info=pending.get(cid)
+    if not info: tg_cb(qid,"Session expired"); return
+    artist=info.get("artists",[{}])[0]
+    tg_cb(qid,"Back")
+    threading.Thread(target=lambda: show_confirm(cid,artist), daemon=True).start()
 
 def cb_yt(cid,query,qid):
     tg_cb(qid,"🔍 Searching..."); msg=tg_send(cid,ICON["youtube"]+" Searching YouTube...")
@@ -468,6 +494,8 @@ def main():
                         elif pts[0]=="pick": cb_pick(cid,int(pts[1]),qid)
                         elif pts[0]=="add": cb_add(cid,pts,qid)
                         elif pts[0]=="album": cb_album(cid,pts,qid)
+                        elif pts[0]=="content": cb_content(cid,pts,qid)
+                        elif pts[0]=="back": cb_back(cid,pts[1] if len(pts)>1 else "",qid)
                         elif pts[0]=="yt": cb_yt(cid,pts[1] if len(pts)>1 else "",qid)
                         elif pts[0]=="ytdl": cb_ytdl(cid,int(pts[1]),qid)
                         elif pts[0]=="bc": cb_bc(cid,pts[1] if len(pts)>1 else "",qid)
