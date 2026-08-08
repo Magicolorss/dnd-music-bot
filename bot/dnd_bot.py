@@ -60,7 +60,7 @@ def mb_search(name):
     except: return []
 def mb_albums(mbid):
     try:
-        r=requests.get("https://musicbrainz.org/ws/2/release-group/",params={"artist":mbid,"fmt":"json","limit":100,"type":"album|ep"},headers={"User-Agent":"DnDBot/1.0"},timeout=15)
+        r=requests.get("https://musicbrainz.org/ws/2/release-group/",params={"artist":mbid,"fmt":"json","limit":100,"type":"album"},headers={"User-Agent":"DnDBot/1.0"},timeout=15)
         out=[]
         for g in r.json().get("release-groups",[]):
             y=g.get("first-release-date","")[:4] if g.get("first-release-date") else "9999"
