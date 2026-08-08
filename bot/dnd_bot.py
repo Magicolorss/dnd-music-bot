@@ -278,12 +278,18 @@ def cmd_recent(cid):
         h=lidarr("GET","history?page=1&pageSize=10&sortKey=date&sortDirection=descending&eventType=1")
         if h and "records" in h and len(h["records"])>0:
             for r in h["records"]:
-                a=r.get("artist",{}).get("artistName","?") if r.get("artist") else "?"
-                b=r.get("album",{}).get("title","?") if r.get("album") else "?"
+                aid=r.get("artistId"); bid=r.get("albumId")
+                an="?"; bn="?"
+                if aid:
+                    art=lidarr("GET","artist/"+str(aid))
+                    if art: an=art.get("artistName","?")
+                if bid:
+                    alb=lidarr("GET","album/"+str(bid))
+                    if alb: bn=alb.get("title","?")
                 d=r.get("date","")[:10] if r.get("date") else "?"
-                msg+="• "+a+" - "+b+" ("+d+")\n"
+                msg+="• "+an+" - "+bn+" ("+d+")\n"
         else: msg+="No recently imported albums.\n"
-    except: msg+="Error fetching history.\n"
+    except Exception as e: msg+="Error: "+str(e)[:50]
     tg_send(cid,msg)
 
 def cmd_disk(cid):
