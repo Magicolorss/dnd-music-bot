@@ -119,16 +119,24 @@ def sc_download(vid,title,cid):
     else: tg_send(cid,"❌ SoundCloud failed.\n"+r.stderr[-200:])
 
 # ── Lidarr ops ──────────────────────────────────────────────────
-def do_add(cid,mbid,name):
+def do_add(cid,mbid,name,album_ids=None):
+    """Add artist to Lidarr. If album_ids list provided, only monitor those albums."""
     lookup=lidarr("GET","artist/lookup?term="+urllib.parse.quote("lidarr:"+mbid))
     if lookup and len(lookup)>0 and lookup[0].get("id",0)>0:
         ex=lookup[0]
-        if ex.get("monitored"): tg_send(cid,"✅ *"+name+"* already in Lidarr!"); return
+        if ex.get("monitored"):
+            tg_send(cid,"✅ *"+name+"* already in Lidarr!")
+            return
         ex["monitored"]=True; ex["addOptions"]={"searchForMissingAlbums":True}
         lidarr("PUT","artist/"+str(ex["id"]),ex); tg_send(cid,"✅ *"+name+"* now monitored! Searching..."); return
-    add=lidarr("POST","artist",{"foreignArtistId":mbid,"artistName":name,"monitored":True,"monitorNewItems":"all",
-        "rootFolderPath":"/music","qualityProfileId":2,"metadataProfileId":1,"addOptions":{"searchForMissingAlbums":True,"searchForNewAlbums":True}})
-    if add: tg_send(cid,"✅ *"+name+"* added! Auto-downloading through Soulseek + torrents...\n📥 Will notify when complete!")
+    body={"foreignArtistId":mbid,"artistName":name,"monitored":True,"monitorNewItems":"all",
+        "rootFolderPath":"/music","qualityProfileId":2,"metadataProfileId":1,
+        "addOptions":{"searchForMissingAlbums":True,"searchForNewAlbums":True}}
+    if album_ids:
+        body["albumsToMonitor"]=album_ids
+        body["addOptions"]["searchForMissingAlbums"]=True
+    add=lidarr("POST","artist",body)
+    if add: tg_send(cid,"✅ *"+name+"* added! "+(str(len(album_ids))+" album(s) will be downloaded." if album_ids else "Auto-downloading..."))
     else: tg_send(cid,"❌ Failed to add *"+name+"*")
 
 # ── UI ──────────────────────────────────────────────────────────
@@ -150,13 +158,17 @@ def show_confirm(cid,artist):
     aname=artist.get("name","?"); mbid=artist["id"]; d=artist.get("disambiguation",""); albums=mb_albums(mbid); cover=artist_cover(aname); ai=ai_guess(aname) if OR_KEY else None
     cap=ICON["musicbrainz"]+" *"+aname+"*"+(" ("+d+")" if d else "")
     if ai and ai.get("bio"): cap+="\n\n"+ai["bio"][:300]
-    if albums: cap+="\n\n📀 *Albums:*"+ "".join("\n• "+a["title"]+(" ("+a["year"]+")" if a["year"] else "") for a in albums[:5])
-    cap+="\n\n*Add to Lidarr and start downloading?*"
-    btns=[[{"text":"✅ Yes, download","callback_data":"add:"+mbid+":"+aname}],
-           [{"text":ICON["bandcamp"]+" Bandcamp (FLAC)","callback_data":"send:"+aname}],
-           [{"text":ICON["youtube"]+" YouTube","callback_data":"yt:"+aname[:40]}],
-           [{"text":"❌ Cancel","callback_data":"cancel"}]]
-    pending[cid]={"artists":[artist]}
+    if albums: cap+="\n\n📀 *Albums:*"
+    pending[cid]={"artists":[artist],"albums":albums}
+    # Album picker buttons
+    btns=[]
+    for a in albums[:8]:
+        label=a["title"][:25]+(" ("+a["year"]+")" if a["year"] else "")
+        btns.append([{"text":"🎵 "+label,"callback_data":"album:"+a["id"]+":"+a["title"][:20]}])
+    btns.append([{"text":"📥 Add all + download","callback_data":"add:"+mbid+":"+aname}])
+    btns.append([{"text":ICON["bandcamp"]+" Bandcamp","callback_data":"send:"+aname}])
+    btns.append([{"text":ICON["youtube"]+" YouTube","callback_data":"yt:"+aname[:40]}])
+    btns.append([{"text":"❌ Cancel","callback_data":"cancel"}])
     if cover: tg_photo(cid,cover,cap,btns)
     else: tg_send(cid,cap,btns)
 
@@ -192,6 +204,19 @@ def cb_add(cid,parts,qid):
     if cid in pending: del pending[cid]
     tg_cb(qid,"Adding "+parts[2][:20]+"...")
     threading.Thread(target=lambda: do_add(cid,parts[1],parts[2]), daemon=True).start()
+
+def cb_album(cid,parts,qid):
+    gid=parts[1]; title=parts[2] if len(parts)>2 else "selected album"
+    info=pending.get(cid)
+    if not info: tg_cb(qid,"Session expired"); return
+    artist=info.get("artists",[{}])[0]; aname=artist.get("name","?")
+    # Find the Lidarr album by foreignAlbumId (MusicBrainz release-group ID)
+    lidarr_lookup=lidarr("GET","album/lookup?term="+urllib.parse.quote("lidarr:"+gid))
+    lidarr_id=None
+    if lidarr_lookup and len(lidarr_lookup)>0:
+        lidarr_id=lidarr_lookup[0].get("id")
+    tg_cb(qid,"Adding "+title[:20]+"...")
+    threading.Thread(target=lambda: do_add(cid,artist.get("id",""),aname,album_ids=[lidarr_id] if lidarr_id else None), daemon=True).start()
 
 def cb_yt(cid,query,qid):
     tg_cb(qid,"🔍 Searching..."); msg=tg_send(cid,ICON["youtube"]+" Searching YouTube...")
@@ -439,6 +464,7 @@ def main():
                         if data=="cancel": cb_cancel(cid,qid)
                         elif pts[0]=="pick": cb_pick(cid,int(pts[1]),qid)
                         elif pts[0]=="add": cb_add(cid,pts,qid)
+                        elif pts[0]=="album": cb_album(cid,pts,qid)
                         elif pts[0]=="yt": cb_yt(cid,pts[1] if len(pts)>1 else "",qid)
                         elif pts[0]=="ytdl": cb_ytdl(cid,int(pts[1]),qid)
                         elif pts[0]=="bc": cb_bc(cid,pts[1] if len(pts)>1 else "",qid)
