@@ -40,6 +40,46 @@ def allowed(cid):
     if not ALLOWED or ALLOWED==[""]: return True
     return str(cid) in ALLOWED
 
+# ── Lidarr library helpers ────────────────────────────────────────
+def lidarr_artists():
+    r=lidarr("GET","artist?includeAllArtistAlbums=true")
+    if not r: return []
+    r.sort(key=lambda a: a.get("artistName","").lower())
+    return r
+
+def lidarr_albums(aid):
+    return lidarr("GET",f"album?artistId={aid}") or []
+
+def lidarr_tracks(aid):
+    return lidarr("GET",f"track?albumId={aid}") or []
+
+def lidarr_missing(page=1,size=20):
+    return lidarr("GET",f"wanted/missing?page={page}&pageSize={size}&sortKey=albums.title&sortDirection=ascending") or {}
+
+def lidarr_stats():
+    arts=lidarr_artists()
+    if not arts: return None
+    total_albums=sum(a.get("statistics",{}).get("albumCount",0) for a in arts)
+    total_tracks=sum(a.get("statistics",{}).get("trackCount",0) for a in arts)
+    total_files=sum(a.get("statistics",{}).get("trackFileCount",0) for a in arts)
+    total_size=sum(a.get("statistics",{}).get("sizeOnDisk",0) for a in arts)
+    # Count monitored vs unmonitored
+    monitored=sum(1 for a in arts if a.get("monitored"))
+    return {"artists":len(arts),"albums":total_albums,"tracks":total_tracks,"files":total_files,"size":total_size,"monitored":monitored}
+
+def get_quality(album):
+    """Best quality string from album's tracks."""
+    qs=lidarr_tracks(album.get("id"))
+    if not qs: return "?"
+    quals=set()
+    for t in qs:
+        f=t.get("trackFile")
+        if f:
+            q=f.get("quality",{}).get("quality",{}).get("name","?")
+            quals.add(q)
+    if not quals: return "❌ Missing"
+    return ", ".join(sorted(quals))
+
 # AI
 def ai_guess(text):
     if not OR_KEY: return None
@@ -285,7 +325,58 @@ def cb_cancel(cid,qid):
     tg_cb(qid,"Cancelled")
     if cid in pending: del pending[cid]
 
+# ── Library browser callbacks ─────────────────────────────────────
+def cb_lib_page(cid,parts,qid):
+    pg=int(parts[1]) if len(parts)>1 and parts[1].isdigit() else 0
+    tg_cb(qid,"Page "+str(pg+1))
+    threading.Thread(target=lambda: show_library(cid,pg), daemon=True).start()
+
+def cb_lib_artist(cid,parts,qid):
+    aid=parts[1]
+    tg_cb(qid,"Loading artist...")
+    threading.Thread(target=lambda: show_library_artist(cid,aid), daemon=True).start()
+
+def cb_lib_album(cid,parts,qid):
+    album_id=parts[1]
+    tg_cb(qid,"Loading album details...")
+    threading.Thread(target=lambda: show_album_detail(cid,album_id), daemon=True).start()
+
+def cb_lib_back(cid,parts,qid):
+    tg_cb(qid,"Back")
+    threading.Thread(target=lambda: show_library(cid,0), daemon=True).start()
+
+def cb_lib_artist_back(cid,parts,qid):
+    tg_cb(qid,"Back")
+    threading.Thread(target=lambda: show_library(cid,0), daemon=True).start()
+
+def cb_missing_page(cid,parts,qid):
+    pg=int(parts[1]) if len(parts)>1 and parts[1].isdigit() else 1
+    tg_cb(qid,"Page "+str(pg))
+    threading.Thread(target=lambda: show_missing(cid,pg), daemon=True).start()
+
+def cb_missing_search(cid,parts,qid):
+    tg_cb(qid,"Searching missing albums...")
+    threading.Thread(target=lambda: do_missing_search(cid), daemon=True).start()
+
+def cb_album_search(cid,parts,qid):
+    album_id=parts[1]
+    tg_cb(qid,"Searching album...")
+    threading.Thread(target=lambda: do_album_search(cid,album_id), daemon=True).start()
+
+def cb_album_unmonitor(cid,parts,qid):
+    album_id=parts[1]
+    tg_cb(qid,"Updating...")
+    threading.Thread(target=lambda: do_album_unmonitor(cid,album_id), daemon=True).start()
+
 # ── Status & commands ──────────────────────────────────────────
+PER_PAGE = 10
+
+def fmt_size(b):
+    for u in ("B","KB","MB","GB","TB"):
+        if b<1024: return f"{b:.1f}{u}"
+        b/=1024
+    return f"{b:.1f}PB"
+
 CMD_HELP = """🎵 *DnD Music Bot — Commands*
 
 🎤 *Add music:*
@@ -294,11 +385,19 @@ Just send an artist name or `Artist - Album`
 • 🟣 Bandcamp: tap button → paste URL → real FLAC
 • 🔴 YouTube / 🟠 SoundCloud fallback
 
-📋 *Commands:*
+📋 *Library (from Lidarr):*
+`/library` — Browse all artists in your collection
+`/missing` — Albums still missing / wanted
+`/find <name>` — Check if artist is already in your library
+`/stats` — Library overview (artists, albums, size)
+
+📋 *Downloads:*
 `/status` — Downloads, torrents, disk
 `/queue` — Lidarr download queue only
 `/recent` — Last 10 imported albums
 `/disk` — Disk usage details
+
+🔗 *Services:*
 `/lidarr` — Open Lidarr web UI
 `/qbit` — Open qBittorrent web UI
 `/slskd` — Open slskd web UI
@@ -346,7 +445,6 @@ def cmd_recent(cid):
     tg_send(cid,msg)
 
 def cmd_disk(cid):
-    # Try reading real disk info from file written by watchdog
     try:
         with open("/downloads/.disk_status") as f:
             line=f.read().strip()
@@ -356,7 +454,6 @@ def cmd_disk(cid):
                     tg_send(cid,"💾 *External SSD (/Volumes/M1)*\nSize: "+parts[1]+"\nUsed: "+parts[2]+"\nFree: "+parts[3]+"\nUsage: "+parts[4])
                     return
     except: pass
-    # Fallback: Lidarr API
     try:
         rf=lidarr("GET","rootFolder")
         if rf and len(rf)>0:
@@ -390,6 +487,180 @@ def cmd_restart(cid, service):
 def cmd_stack(cid):
     tg_send(cid,"🐳 *Stack containers*\n• flaresolverr\n• qbittorrent\n• prowlarr\n• lidarr\n• slskd\n• soularr\n• dnd-bot\n\nRun `/restart <name>` to restart any.\nFor live status, check the web UIs:\n`/lidarr` `/qbit` `/slskd` `/prowlarr`")
 
+# ── Library browser UI ──────────────────────────────────────────
+def show_library(cid,page=0):
+    arts=lidarr_artists()
+    if not arts: tg_send(cid,"❌ No artists in Lidarr library."); return
+    total=len(arts); start=page*PER_PAGE; end=min(start+PER_PAGE,total)
+    msg=f"📚 *Your Library ({total} artists)*\n"
+    for i in range(start,end):
+        a=arts[i]
+        n=a.get("artistName","?")[:35]
+        s=a.get("statistics",{})
+        ac=s.get("albumCount",0); fc=s.get("trackFileCount",0)
+        m="🟢" if a.get("monitored") else "🔴"
+        msg+=f"\n{m} {i+1}. *{n}* — {ac} albums, {fc} files"
+    btns=[]
+    if page>0: btns.append({"text":"◀️ Prev","callback_data":f"lib_page:{page-1}"})
+    if end<total: btns.append({"text":"Next ▶️","callback_data":f"lib_page:{page+1}"})
+    nav_btns=[]
+    if btns: nav_btns.append(btns)
+    # Add first 5 artists as quick-jump buttons per page
+    for i in range(start,end):
+        a=arts[i]; label=a.get("artistName","?")[:20]
+        nav_btns.append([{"text":label,"callback_data":f"lib_artist:{a.get('id')}"}])
+    tg_send(cid,msg,nav_btns)
+
+def show_library_artist(cid,aid):
+    a=lidarr("GET","artist/"+str(aid))
+    if not a: tg_send(cid,"❌ Artist not found."); return
+    aname=a.get("artistName","?")
+    albums=lidarr_albums(aid)
+    if not albums: tg_send(cid,f"📀 *{aname}*\n\nNo albums found in Lidarr."); return
+    # Sort by release date descending
+    albums.sort(key=lambda x: x.get("releaseDate","") or "0000", reverse=True)
+    msg=f"💿 *{aname}* — {len(albums)} albums\n"
+    btns=[]
+    for i,al in enumerate(albums[:15]):
+        t=al.get("title","?")[:25]
+        y=(al.get("releaseDate","") or "")[:4]
+        m="🟢" if al.get("monitored") else "🔴"
+        st="✅" if al.get("statistics",{}).get("trackFileCount",0)>0 else "⬇️"
+        msg+=f"\n{m} {st} {t} ({y})"
+        btns.append([{"text":"💿 "+t[:25],"callback_data":f"lib_album:{al.get('id')}"}])
+    btns.append([{"text":"🔙 Back to Library","callback_data":"lib_back:0"}])
+    tg_send(cid,msg,btns)
+
+def show_album_detail(cid,album_id):
+    al=lidarr("GET","album/"+str(album_id))
+    if not al: tg_send(cid,"❌ Album not found."); return
+    title=al.get("title","?"); aname=al.get("artist",{}).get("artistName","?")
+    y=(al.get("releaseDate","") or "")[:4]; genre=al.get("genres",[]) or []
+    genre_str=", ".join(g[:12] for g in genre[:3]) if genre else "—"
+    monitored=al.get("monitored",False)
+    q=get_quality(al)
+    stats=al.get("statistics",{})
+    tc=stats.get("trackCount",0); fc=stats.get("trackFileCount",0)
+    size=stats.get("sizeOnDisk",0)
+    # Track listing
+    tracks=lidarr_tracks(album_id)
+    msg=f"💿 *{title}*\n{aname} ({y})\n━━━━━━━━━━━━━━━━━━━\n"
+    msg+=f"🎵 Monitored: {'✅' if monitored else '🔴'} | Genre: {genre_str}\n"
+    msg+=f"🎧 Quality: {q} | Tracks: {fc}/{tc}\n"
+    if size>0: msg+=f"💾 Size: {fmt_size(size)}\n"
+    msg+="\n📜 *Tracklist:*\n"
+    if tracks:
+        for i,t in enumerate(tracks[:20],1):
+            tn=t.get("trackNumber",i); tt=t.get("title","?")[:30]
+            has_file="✅" if t.get("trackFile") else "⬇️"
+            msg+=f"{has_file} {tn}. {tt}\n"
+        if len(tracks)>20: msg+=f"... and {len(tracks)-20} more tracks\n"
+    else:
+        msg+="No track data available.\n"
+    btns=[[{"text":"📥 Search on Lidarr","callback_data":f"album_search:{album_id}"},
+            {"text":"👁️ Unmonitor" if monitored else "👁️ Monitor","callback_data":f"album_unmon:{album_id}"}]]
+    btns.append([{"text":"🔙 Back to Artist","callback_data":"lib_artist_back:0"}])
+    tg_send(cid,msg,btns)
+
+def cmd_library(cid):
+    tg_send(cid,"📚 Loading library...")
+    threading.Thread(target=lambda: show_library(cid,0), daemon=True).start()
+
+# ── Missing / Wanted ────────────────────────────────────────────
+def show_missing(cid,page=1):
+    res=lidarr_missing(page)
+    records=res.get("records",[])
+    total=res.get("totalRecords",0)
+    if not records: tg_send(cid,"🎉 No missing albums — library is complete!"); return
+    msg=f"⬇️ *Missing Albums ({total} total)* — Page {page}\n\n"
+    for i,r in enumerate(records,1):
+        an=r.get("artist",{}).get("artistName","?")
+        al=r.get("album",{}).get("title","?")
+        msg+=f"{i}. *{an}* — {al}\n"
+    btns=[[{"text":"📥 Search ALL missing","callback_data":"missing_search:all"}]]
+    nav=[]
+    if page>1: nav.append({"text":"◀️ Prev","callback_data":f"missing_page:{page-1}"})
+    if page*20<total: nav.append({"text":"Next ▶️","callback_data":f"missing_page:{page+1}"})
+    if nav: btns.append(nav)
+    tg_send(cid,msg,btns)
+
+def do_missing_search(cid):
+    tg_send(cid,"⏳ Searching all missing albums...")
+    res=lidarr_missing(1,200)
+    ids=[r.get("albumId") or r.get("id") for r in res.get("records",[]) if r]
+    if not ids: tg_send(cid,"No missing albums to search."); return
+    chunk_size=50
+    for i in range(0,len(ids),chunk_size):
+        chunk=ids[i:i+chunk_size]
+        lidarr("POST","command",{"name":"AlbumSearch","albumIds":chunk})
+    tg_send(cid,f"✅ Searching {len(ids)} albums! Check `/queue` for progress.")
+
+def cmd_missing(cid):
+    tg_send(cid,"⏳ Checking missing albums...")
+    threading.Thread(target=lambda: show_missing(cid,1), daemon=True).start()
+
+# ── Find in library ─────────────────────────────────────────────
+def cmd_find(cid, name):
+    if not name: tg_send(cid,"Usage: `/find Artist Name`"); return
+    tg_send(cid,"🔍 Searching your library...")
+    threading.Thread(target=lambda: do_find(cid,name), daemon=True).start()
+
+def do_find(cid,name):
+    arts=lidarr_artists()
+    if not arts: tg_send(cid,"❌ No artists in library."); return
+    name_l=name.lower()
+    matches=[a for a in arts if name_l in a.get("artistName","").lower()]
+    if not matches:
+        tg_send(cid,f"❌ *{name}* not found in your library.\nYou can still add it by sending the artist name directly!")
+        return
+    if len(matches)==1:
+        a=matches[0]; n=a.get("artistName","?")
+        m="🟢 Monitored" if a.get("monitored") else "🔴 Unmonitored"
+        s=a.get("statistics",{})
+        msg=f"✅ *{n}* is in your library!\n{m} | {s.get('albumCount',0)} albums | {s.get('trackFileCount',0)} files\n💾 {fmt_size(s.get('sizeOnDisk',0))}"
+        btns=[[{"text":"💿 View Albums","callback_data":f"lib_artist:{a.get('id')}"}]]
+        tg_send(cid,msg,btns)
+        return
+    msg=f"🔍 Found {len(matches)} matches for *{name}*:\n"
+    btns=[]
+    for i,a in enumerate(matches):
+        n=a.get("artistName","?")[:30]
+        msg+=f"\n{i+1}. {n}"
+        btns.append([{"text":n,"callback_data":f"lib_artist:{a.get('id')}"}])
+    tg_send(cid,msg,btns)
+
+# ── Stats ───────────────────────────────────────────────────────
+def cmd_stats(cid):
+    tg_send(cid,"📊 Loading library stats...")
+    threading.Thread(target=lambda: do_stats(cid), daemon=True).start()
+
+def do_stats(cid):
+    s=lidarr_stats()
+    if not s: tg_send(cid,"❌ Could not fetch stats."); return
+    msg=f"📊 *Library Stats*\n━━━━━━━━━━━━━━━━━━━\n"
+    msg+=f"🎤 Artists: {s['artists']} (🟢 {s['monitored']} monitored)\n"
+    msg+=f"💿 Albums: {s['albums']}\n"
+    msg+=f"🎵 Tracks: {s['tracks']} ({s['files']} downloaded)\n"
+    msg+=f"💾 Total size: {fmt_size(s['size'])}\n"
+    pct=int(s['files']/s['tracks']*100) if s['tracks']>0 else 0
+    msg+=f"📊 Completion: {pct}%"
+    tg_send(cid,msg)
+
+# ── Actions ─────────────────────────────────────────────────────
+def do_album_search(cid,album_id):
+    r=lidarr("POST","command",{"name":"AlbumSearch","albumIds":[int(album_id)]})
+    if r: tg_send(cid,f"✅ Searching album! Check `/queue`.")
+    else: tg_send(cid,"❌ Search failed.")
+
+def do_album_unmonitor(cid,album_id):
+    al=lidarr("GET","album/"+str(album_id))
+    if not al: tg_send(cid,"❌ Album not found."); return
+    new_state=not al.get("monitored",True)
+    al["monitored"]=new_state
+    r=lidarr("PUT",f"album/{album_id}",al)
+    if r: tg_send(cid,f"{'🔴 Unmonitored' if not new_state else '🟢 Now monitoring'} album.")
+    else: tg_send(cid,"❌ Update failed.")
+
 # ── Messages ────────────────────────────────────────────────────
 def handle(cid, text):
     text=text.strip()
@@ -413,6 +684,10 @@ def handle(cid, text):
     elif cmd=="prowlarr": cmd_prowlarr(cid); return
     elif cmd=="restart": cmd_restart(cid, arg); return
     elif cmd=="stack": cmd_stack(cid); return
+    elif cmd=="library": cmd_library(cid); return
+    elif cmd=="missing": cmd_missing(cid); return
+    elif cmd=="find": cmd_find(cid, arg); return
+    elif cmd=="stats": cmd_stats(cid); return
     elif cmd: return  # unknown command, ignore
 
     # Check if waiting for Bandcamp URL
@@ -502,6 +777,15 @@ def main():
                         elif pts[0]=="bcdl": cb_bcdl(cid,int(pts[1]),qid)
                         elif pts[0]=="sc": cb_sc(cid,pts[1] if len(pts)>1 else "",qid)
                         elif pts[0]=="scdl": cb_scdl(cid,int(pts[1]),qid)
+                        elif pts[0]=="lib_page": cb_lib_page(cid,pts,qid)
+                        elif pts[0]=="lib_artist": cb_lib_artist(cid,pts,qid)
+                        elif pts[0]=="lib_album": cb_lib_album(cid,pts,qid)
+                        elif pts[0]=="lib_back": cb_lib_back(cid,pts,qid)
+                        elif pts[0]=="lib_artist_back": cb_lib_artist_back(cid,pts,qid)
+                        elif pts[0]=="missing_page": cb_missing_page(cid,pts,qid)
+                        elif pts[0]=="missing_search": cb_missing_search(cid,pts,qid)
+                        elif pts[0]=="album_search": cb_album_search(cid,pts,qid)
+                        elif pts[0]=="album_unmon": cb_album_unmonitor(cid,pts,qid)
                         continue
                     msg=u.get("message",{}); cid=msg.get("chat",{}).get("id",0)
                     if not allowed(cid): tg_send(cid,"Private bot"); continue
