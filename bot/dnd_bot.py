@@ -60,7 +60,7 @@ def mb_search(name):
     except: return []
 def mb_albums(mbid):
     try:
-        r=requests.get("https://musicbrainz.org/ws/2/release-group/",params={"artist":mbid,"fmt":"json","limit":6,"type":"album|ep"},headers={"User-Agent":"DnDBot/1.0"},timeout=15)
+        r=requests.get("https://musicbrainz.org/ws/2/release-group/",params={"artist":mbid,"fmt":"json","limit":20,"type":"album|ep"},headers={"User-Agent":"DnDBot/1.0"},timeout=15)
         out=[]
         for g in r.json().get("release-groups",[]):
             y=g.get("first-release-date","")[:4] if g.get("first-release-date") else ""
@@ -162,7 +162,7 @@ def show_confirm(cid,artist):
     pending[cid]={"artists":[artist],"albums":albums}
     # Album picker buttons
     btns=[]
-    for a in albums[:8]:
+    for a in albums[:15]:
         label=a["title"][:25]+(" ("+a["year"]+")" if a["year"] else "")
         btns.append([{"text":"🎵 "+label,"callback_data":"album:"+a["id"]+":"+a["title"][:20]}])
     btns.append([{"text":"📥 Add all + download","callback_data":"add:"+mbid+":"+aname}])
