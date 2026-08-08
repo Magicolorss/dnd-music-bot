@@ -60,11 +60,13 @@ def mb_search(name):
     except: return []
 def mb_albums(mbid):
     try:
-        r=requests.get("https://musicbrainz.org/ws/2/release-group/",params={"artist":mbid,"fmt":"json","limit":20,"type":"album|ep"},headers={"User-Agent":"DnDBot/1.0"},timeout=15)
+        r=requests.get("https://musicbrainz.org/ws/2/release-group/",params={"artist":mbid,"fmt":"json","limit":100,"type":"album|ep"},headers={"User-Agent":"DnDBot/1.0"},timeout=15)
         out=[]
         for g in r.json().get("release-groups",[]):
-            y=g.get("first-release-date","")[:4] if g.get("first-release-date") else ""
+            y=g.get("first-release-date","")[:4] if g.get("first-release-date") else "9999"
             out.append({"title":g.get("title","?"),"year":y,"id":g.get("id","")})
+        # Sort by year ascending (oldest first)
+        out.sort(key=lambda x: (x["year"] if x["year"].isdigit() else 9999, x["title"]))
         return out
     except: return []
 def get_cover(mbid):
@@ -162,7 +164,7 @@ def show_confirm(cid,artist):
     pending[cid]={"artists":[artist],"albums":albums}
     # Album picker buttons
     btns=[]
-    for a in albums[:15]:
+    for a in albums[:25]:
         label=a["title"][:25]+(" ("+a["year"]+")" if a["year"] else "")
         btns.append([{"text":"🎵 "+label,"callback_data":"album:"+a["id"]+":"+a["title"][:20]}])
     btns.append([{"text":"📥 Add all + download","callback_data":"add:"+mbid+":"+aname}])
@@ -405,16 +407,17 @@ def handle(cid, text):
     # Run search in background so bot stays responsive
     def do_search():
         artists=mb_search(text)
+        # If not found, try AI silently (no "Did you mean?" message)
         if not artists:
             ai=ai_guess(text)
             if ai and "error" not in ai and ai.get("corrected"):
-                tg_send(cid,"Did you mean *"+ai["corrected"]+"*?")
                 artists=mb_search(ai["corrected"])
         if not artists:
             show_platform_picker(cid,text)
             return
-        if len(artists)>1: picker(cid,artists); return
-        show_confirm(cid,artists[0])
+        # Pick best match (highest score) and go straight to albums
+        best=max(artists, key=lambda a: a.get("score",0))
+        show_confirm(cid,best)
     
     threading.Thread(target=do_search, daemon=True).start()
 
